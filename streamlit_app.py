@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
 import streamlit as st
+import base64
+from pathlib import Path
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +24,19 @@ client = openai.OpenAI(api_key=XAI_API_KEY, base_url="https://api.x.ai/v1")
 # Database and schema setup
 DATABASE_FILE = "example_database.sqlite"
 SCHEMA_FILE_PATH = "schema.json"
+
+# Function to encode image to Base64
+def img_to_bytes(img_path):
+    img_bytes = Path(img_path).read_bytes()
+    encoded = base64.b64encode(img_bytes).decode()
+    return encoded
+
+# Function to create an HTML img tag with the Base64-encoded image
+def img_to_html(img_path):
+    img_html = "<img src='data:image/png;base64,{}' class='img-fluid' style='display: block; width: 25%; margin: 0 auto;'>".format(
+        img_to_bytes(img_path)
+    )
+    return img_html
 
 # Load schema
 def load_schema(schema_file_path):
@@ -41,21 +56,18 @@ model = create_engine(f"sqlite:///{DATABASE_FILE}")
 # SQL query generation (function for xAI)
 def generate_sql(natural_language_query):
     try:
-        # Fetch the database schema
         schema = get_database_schema()
         schema_str = "\n".join(
             f"Table: {table}\n    Columns: {', '.join(columns)}"
             for table, columns in schema.items()
         )
 
-        # Construct the system prompt
         system_message = (
             f"You are a SQL assistant for a SQLite database. Use the following database schema to write valid SQL queries. "
             f"For date-related operations, use strftime('%Y', column_name) to extract the year. "
             f"Only return the SQL:\n{schema_str}"
         )
 
-        # Generate SQL using the xAI client
         response = client.chat.completions.create(
             model="grok-beta",
             messages=[
@@ -67,19 +79,15 @@ def generate_sql(natural_language_query):
             temperature=0
         )
 
-        # Parse the response to extract the SQL
         if hasattr(response, 'choices') and len(response.choices) > 0:
             sql_query = response.choices[0].message.content.strip()
 
-            # Handle SQL formatting
             if sql_query.startswith("```"):
                 sql_query = "\n".join(sql_query.split("\n")[1:-1]).strip()
 
             valid_keywords = ["SELECT", "INSERT", "UPDATE", "DELETE"]
             if any(sql_query.upper().startswith(keyword) for keyword in valid_keywords):
                 return sql_query
-
-            return None
 
         return None
 
@@ -106,27 +114,22 @@ def generate_chart(dataframe):
             st.error("No data available to generate a chart.")
             return
 
-        # Check if the dataframe has at least two columns for charting
         if dataframe.shape[1] < 2:
             st.error("Insufficient data columns for chart generation. At least two columns are required.")
             return
 
-        # Assuming the first column is 'x' and the second column is 'y'
         x = dataframe.iloc[:, 0]
         y = dataframe.iloc[:, 1]
 
-        # Generate a list of colors for the bars, alternating between blue and red
         colors = ['blue', 'red'] * (len(x) // 2 + 1)
         colors = colors[:len(x)]
 
-        # Create a bar chart
         fig, ax = plt.subplots()
         ax.bar(x, y, color=colors)
         ax.set_xlabel("X-axis Label")
         ax.set_ylabel("Y-axis Label")
         ax.set_title("Chart Title")
 
-        # Display the chart in Streamlit
         st.pyplot(fig)
 
     except Exception as e:
@@ -138,10 +141,10 @@ def process_query(query, output_format):
     sql_query = generate_sql(query)
     if not sql_query:
         st.error("Failed to generate a valid SQL query. Please rephrase your query.")
-        st.session_state.show_examples = True  # Show examples when query fails
-        return False  # Return False to indicate failure
+        st.session_state.show_examples = True
+        return False
 
-    st.session_state.show_examples = False  # Hide examples when query succeeds
+    st.session_state.show_examples = False
 
     try:
         with model.connect() as conn:
@@ -153,8 +156,58 @@ def process_query(query, output_format):
             st.dataframe(result)
         elif output_format == "chart":
             generate_chart(result)
-        
-        return True  # Return True to indicate success
+
+        # Add CSS-based download buttons
+        st.markdown(
+            """
+            <style>
+                .download-buttons-container {
+                    display: flex;
+                    justify-content: left;
+                    gap: 15px;
+                    margin-top: 10px;
+                }
+                .download-button {
+                    background-color: #f0f8ff;
+                    border: 1px solid #ccc;
+                    border-radius: 5px;
+                    padding: 5px 10px;
+                    text-align: center;
+                    font-family: Arial, sans-serif;
+                    font-size: 14px;
+                    text-decoration: none;
+                    color: black;
+                }
+                .download-button:hover {
+                    background-color: #d0e8ff;
+                }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        csv_download_link = f"""
+        <a href="data:text/csv;base64,{base64.b64encode(result.to_csv(index=False).encode('utf-8')).decode()}" download="query_result.csv" class="download-button">
+            Download as CSV
+        </a>
+        """
+
+        json_download_link = f"""
+        <a href="data:application/json;base64,{base64.b64encode(result.to_json(orient="records", lines=True).encode('utf-8')).decode()}" download="query_result.json" class="download-button">
+            Download as JSON
+        </a>
+        """
+
+        st.markdown(
+            f"""
+            <div class="download-buttons-container">
+                {csv_download_link}
+                {json_download_link}</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        return True
 
     except Exception as e:
         logging.error(f"Error processing query: {str(e)}")
@@ -162,23 +215,12 @@ def process_query(query, output_format):
         return False
 
 # Streamlit app layout
-# Add custom CSS and an image
 st.markdown(
     """
     <style>
-        .main {
-            background-color: #f0f8ff; /* Light blue background */
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1);
-        }
         .header {
             text-align: center;
             margin-bottom: 20px;
-        }
-        .header img {
-            width: 150px;
-            margin-bottom: 10px;
         }
         .header h1 {
             font-family: Arial, sans-serif;
@@ -186,26 +228,30 @@ st.markdown(
             color: #333;
         }
         .header p {
-            font-family: Arial, sans-serif;
             font-size: 1.2rem;
             color: #666;
         }
     </style>
-    <div class="header">
-        <img src="https://cdn-uploads.huggingface.co/production/uploads/637b0075806b18943e4ba357/_5rdIQZwyaUFb84xKW_AV.png" alt="Text2SQL Image">
-        <h1>Natural Language to SQL App</h1>
-        <p>Query your database using plain English.</p>
-    </div>
     """,
     unsafe_allow_html=True,
 )
 
-# Main app content
+# Add the header image and text
+st.markdown(
+    """
+    <div class="header">
+        {}
+        <h1>Natural Language to SQL App</h1>
+        <p>Query your database using plain English.</p>
+    </div>
+    """.format(img_to_html("nLDatabaseAccessImg.webp")),
+    unsafe_allow_html=True,
+)
+
 with st.container():
     query = st.text_input("Enter your natural language query:", placeholder="Enter your query here...")
     output_format = st.selectbox("Select output format:", ["text", "table", "chart"])
 
-# Show dynamic examples only when needed
 if st.session_state.get("show_examples", False):
     st.sidebar.subheader("Example Queries For Chart")
     st.sidebar.write("""
@@ -215,11 +261,10 @@ if st.session_state.get("show_examples", False):
     - Show the last ten orders in each month.
     """)
 
-# Button to process the query
 if st.button("Process Query"):
     if not query:
         st.error("Please enter a query.")
-        st.session_state["show_examples"] = True  # Show examples if the query is empty or invalid
+        st.session_state["show_examples"] = True
     else:
         success = process_query(query, output_format)
-        st.session_state["show_examples"] = not success  # Hide examples if the query was successful
+        st.session_state["show_examples"] = not success
